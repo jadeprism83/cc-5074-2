@@ -1,0 +1,4 @@
+# 运行依赖：核心数值计算仅依赖 NumPy。
+# 捕捉视窗（图形入口）与 CLI 只使用 Python 标准库（http.server / argparse / json），
+# 无需 Tk、显示器或任何前端框架。
+numpy>=1.24
