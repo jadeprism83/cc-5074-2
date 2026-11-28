@@ -113,9 +113,19 @@ def test_http_handler_returns_structured_error():
         with urlopen(f"http://127.0.0.1:{port}/api/options") as resp:
             opts = json.loads(resp.read().decode("utf-8"))
         assert opts["ok"] is True and opts["actions"]
+        assert opts["regression_samples"], "回归样例应通过 options 暴露"
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_capture_payload_carries_gate_and_anomaly_flags():
+    p = capture.build_capture_payload(
+        {"action": "walk", "duration": 5.0, "seed": 2})
+    assert "calibration_gate" in p and "anomaly_flags" in p
+    gate = p["calibration_gate"]
+    assert set(gate) >= {"signed", "trigger", "reason", "evidence"}
+    assert isinstance(p["anomaly_flags"], list)
 
 
 # --------------------------------------------------------------------------- #

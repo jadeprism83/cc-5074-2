@@ -24,10 +24,38 @@ python3 -m inertial_pose.capture --port 8123
 - **结果区**：3D 骨架姿态、每个骨段的**惯性偏差**（最终 FK 朝向相对惯性
   观测的真实角度残差）、累计足滑、足锁-航向**仲裁事件**、标定残差与世界
   参考航向，以及关节角/根位置对照指标。
+- **标定签核门**：显示本次观测是否具备区分「装反轴 vs 陀螺静偏」的能力；
+  仅当可区分（世界航向跨度足够，即含转身）时才签核，否则显示“拒绝签核”。
+- **异常标注**：角色姿态或惯性偏差越界时，页面顶部异常区显式列出（不静默）。
+- **惯性姿态回归样例**：点击加载已知样例（基线/含噪/漂移/轴向切换），再
+  手动切换观测轴向并重放，观察角色姿态与惯性偏差如何变化。
 - 可注入观测噪声、随机安装偏置、运行期航向漂移，并调节足滑/航向仲裁权重。
 
 所有展示数值都来自真实的标定与求解计算；链路异常（非法轴向、未标定传感器、
 越界参数）统一以 `{"ok": false, "error": ...}` 返回并在视窗异常区显示。
+
+## 窗口启动步骤（惯性姿态主入口）
+
+1. 安装运行依赖（仅 NumPy）：
+
+   ```bash
+   python3 -m pip install -r requirements.txt      # 或已有 numpy 环境即可
+   ```
+
+2. 启动捕捉视窗（本机回环，无需显示器/Tk/前端框架）：
+
+   ```bash
+   python3 -m inertial_pose.capture                # 默认 http://127.0.0.1:8000/
+   # 端口占用时：
+   python3 -m inertial_pose.capture --port 8123
+   ```
+
+3. 浏览器打开终端打印的地址（如 `http://127.0.0.1:8000/`）。
+4. 在左侧选择回归样例或调整动作/噪声/漂移，点“生成并求解”；
+   在“观测轴向”区切换某个骨段的轴置换，再看角色姿态与惯性偏差的变化。
+5. 结束：终端 `Ctrl+C` 停止服务。
+
+> 终端命令（CLI/脚本）只辅助批处理与验收，**不替代**上面的图形入口。
 
 ## 命令行（仅辅助）
 
@@ -38,10 +66,11 @@ python3 -m inertial_pose.cli calibrate --action walk          # 标定残差核�
 python3 -m inertial_pose.cli run --action walk --drift-rate 0.12 --out pose.json
 python3 -m inertial_pose.cli sweep  --action walk             # 漂移×权重扫描
 python3 -m inertial_pose.cli bias   --action walk             # 观测噪声扫描
+python3 -m inertial_pose.cli accept --require-pass            # 标定链验收 + 旧样例回归
 ```
 
 另有等价的脚本封装：`scripts/generate_synthetic.py`、
-`scripts/run_bias_sweep.py`。
+`scripts/run_bias_sweep.py`、`scripts/run_calibration_acceptance.py`。
 
 ## 三个严格分开的坐标框架
 
@@ -99,3 +128,10 @@ python3 -m pytest tests/ -q
 测试的求解器输入**只有**合成传感器观测 `q_WS`；真值骨段旋转仅用于标定
 样本与最终指标，不存在绕过标定直接驱动角色的路径（见
 `tests/test_driver_pipeline.py` 的结构性断言）。
+
+标定链验收见 `tests/test_calibration_acceptance.py`（及
+`inertial_pose/calibration_acceptance.py`）：用解析转身/屈膝动作检验全链路，
+以区分力门决定是否允许更新标定，注入单位/手系/时标三类误差并独立辨识，
+用轴误配与静态偏置构造正反例，并以独立参照核对关节角与标定残差。终端辅助
+入口为 `python3 -m inertial_pose.cli accept --require-pass` 或
+`scripts/run_calibration_acceptance.py`。

@@ -9,6 +9,7 @@
 - :mod:`inertial_pose.solver`   观测 -> 满足关节关系的角色姿态（含足锁/航向仲裁）
 - :mod:`inertial_pose.synthetic` 已知动作 + 安装偏差的数据生成
 - :mod:`inertial_pose.metrics`  角度误差、标定残差、足滑距离、躯干转角跃变
+- :mod:`inertial_pose.calibration_acceptance` 标定链验收（解析运动、区分力门、三类误差、独立参照）
 - :mod:`inertial_pose.capture`  角色捕捉视窗（图形入口）
 - :mod:`inertial_pose.cli`      命令行辅助入口
 
@@ -34,6 +35,7 @@ __all__ = [
     "solver",
     "synthetic",
     "metrics",
+    "calibration_acceptance",
     "capture",
     "cli",
 ]

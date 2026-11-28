@@ -11,8 +11,9 @@
 | `inertial_pose/solver.py` | 观测→满足关节关系的姿态；自由度投影、足锁、航向仲裁 | numpy |
 | `inertial_pose/synthetic.py` | 已知动作 + 安装偏差的合成数据与标定样本生成 | numpy |
 | `inertial_pose/metrics.py` | 角度误差、标定残差、足滑、躯干航向跃变 | numpy |
+| `inertial_pose/calibration_acceptance.py` | **标定链验收**：解析运动、区分力门、签核台账、三类误差注入、独立残差参照 | numpy |
 | `inertial_pose/capture.py` | **图形入口**：标准库 Web 捕捉视窗 | 仅标准库 + numpy |
-| `inertial_pose/cli.py` | 命令行**辅助**：calibrate/run/sweep/bias | 仅标准库 + numpy |
+| `inertial_pose/cli.py` | 命令行**辅助**：calibrate/run/sweep/bias/accept | 仅标准库 + numpy |
 
 ## 端到端数据流
 
@@ -44,6 +45,29 @@ PoseResult（root_pos / local_rot / world_rot / world_pos /
            inertial_residual_deg / foot_slide_m / anchors / conflict）
    ▼
 metrics.summarize（与真值对照） 或 capture 视窗（实时呈现）
+```
+
+## 标定链验收数据流（`calibration_acceptance`）
+
+```
+解析运动（转身 / 屈膝 / 举臂 / 已知绕轴）
+   │  真值关节局部旋转 → FK → 真值骨段世界朝向 q_W0B
+   ▼
+传感器观测合成 q_WS = conj(q_W0W) · q_W0B · q_BS
+   │  另可注入：单位 / 左右手系 / 时标差三类误差
+   ▼
+区分力门 evaluate_discrimination
+   │  转身：世界航向跨度 ≥ 阈值；静置：时长达标且逐帧残差线性增长
+   ▼
+签核台账 CalibrationLedger
+   │  仅具区分力才签核；拔掉决定性传感器 → 撤销相关签核
+   ▼
+被测链路：calibrate（安装/世界分离）→ PoseSolver → 关节角 + 残差
+   │  每次求解断言求解器不含 truth* 字段（真值不进入求解）
+   ▼
+独立参照（本模块自行推导，不调用被测函数）→ 交叉核对
+   ▼
+verify_raw_record / evidence_from_disk（执行证据 + 原始记录双通过才判通过）
 ```
 
 ## 关键不变量
@@ -93,3 +117,32 @@ metrics.summarize（与真值对照） 或 capture 视窗（实时呈现）
 | `test_conflict_arbitration.py` | 基线无冲突、漂移触发、权重翻转、假设足滑、持久航向 |
 | `test_mahony.py` | 互补滤波收敛、纯积分航向、航向可观性限制 |
 | `test_synthetic_physics.py` | 真实支撑段、左右腿同构、轴向重排正当性、残差为真实计算 |
+| `test_calibration_acceptance.py` | 标定链验收：区分力门、签核撤销、三类误差、独立参照、旧样例回归、捕捉视窗接入 |
+
+## 标定链验收（`calibration_acceptance.py`）
+
+验收用解析运动生成传感器观测，跑完整标定/坐标转换/关节约束链，且验收器
+自身无法伪报（期望值独立推导，被验收值取自真实求解器）。
+
+**根本歧义**：传感器「装反轴」（固定安装错误）与「陀螺静偏」（运行时零偏，
+航向随时间增长）能产生相同的静态世界朝向。区分必须依赖运动：
+
+- 装反轴 -> 标定后骨段误差在整段内近似**常量**；
+- 静偏 -> 误差随**时间**（航向积分）或随**转角**增长。
+
+`evaluate_discrimination` 据此设**区分力门**：观测世界航向跨度 ≥20°（转身），
+或时长 ≥3s 且逐帧残差线性增长 ≥0.5°/s（延长静置）。`CalibrationLedger`
+**只允许具备区分力的观测更新骨架标定**；无区分力的短暂静置拒绝签核，已签核
+标定在其**决定性传感器**被拔掉时撤销（拔非决定性传感器不撤销，拔决定性必须
+撤销）。捕捉视窗的签核门仅用可观测量（世界航向跨度），不偷看真值。
+
+其他验收子项：已知绕轴动作上注入**单位 / 左右手系 / 时标差**三类误差并用
+幅度、符号、互相关时移独立辨识；故意轴交换/错误单位必须让关节角或标定残差
+显著劣化（且不把真值姿态带入求解）；未观测自由度退回单位先验、无锚点根高度
+退回先验；轴误配与静态偏置构造正反例；旧样例（walk/squat/arm_raise）须运行
+到底。**注意**：对所有传感器施加同一世界偏置会在相对关节角中相消——反例必须
+施加到单个骨段传感器，这一相消性质本身也被断言。
+
+`verify_raw_record` 由原始记录（观测 + 真值 + 参考帧）独立复算关节角与标定
+残差；`evidence_from_disk` 只有执行证据与原始记录同时通过才判整体通过，任一
+篡改即失败，杜绝伪报。

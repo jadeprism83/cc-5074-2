@@ -116,7 +116,16 @@ def build_capture_payload(params: dict) -> dict:
     skel = motion.skeleton
     frames = [_encode_frame(skel.order, r) for r in results]
 
-    # 6) 汇总指标（真实计算，非占位）
+    # 6) 标定签核门（区分力判据）：观测必须能区分「装反轴」与「陀螺静偏」
+    #    才允许提交标定；否则账本拒绝签核，视窗据此提示。
+    from .calibration_acceptance import CalibrationLedger, evaluate_discrimination
+    evidence = evaluate_discrimination(motion, q_WS=observed, use_truth=False)
+    ledger = CalibrationLedger()
+    commit = ledger.attempt(
+        segments=cal.segments, sensor_ids=cal.sensor_ids, evidence=evidence,
+        decisive_sensors=set(cal.sensor_ids), trigger=evidence.mode)
+
+    # 7) 汇总指标（真实计算，非占位）
     residual_matrix = np.array([
         [r.inertial_residual_deg.get(seg, 0.0) for seg in cal.segments]
         for r in results
@@ -147,7 +156,7 @@ def build_capture_payload(params: dict) -> dict:
         np.stack([r.root_pos for r in results])
         - motion.truth_root_pos[: len(results)], axis=1)
 
-    return {
+    payload = {
         "ok": True,
         "meta": {
             "action": action,
@@ -178,7 +187,12 @@ def build_capture_payload(params: dict) -> dict:
         "joint_error_deg": joint_err,
         "root_pos_rmse_m": float(np.sqrt(np.mean(root_err ** 2))),
         "warnings": sorted({w for r in results for w in r.warnings}),
+        "calibration_gate": commit.as_dict(),
     }
+    # 角色姿态与惯性偏差相关异常标注（服务端计算，视窗显式高亮，不静默）
+    from .calibration_acceptance import anomaly_flags
+    payload["anomaly_flags"] = anomaly_flags(payload)
+    return payload
 
 
 def _random_mounts(rng: np.random.Generator, max_tilt_deg: float):
@@ -352,6 +366,11 @@ _PAGE = """<!doctype html>
       仅允许行列式 +1 的正当轴置换；反射（det −1）由后端显式拒绝并在上方报出。</p>
     <div id="remaps"></div>
 
+    <h2>惯性姿态回归样例</h2>
+    <p class="muted" style="font-size:11px;margin:4px 0">
+      点击加载一个已知样例；切换观测轴向并重放，观察角色姿态与惯性偏差。</p>
+    <div id="samples"></div>
+
     <button class="primary" id="run">生成并求解</button>
   </div>
 
@@ -410,13 +429,14 @@ function showError(msg){
 }
 function clearError(){ showError(null); }
 
-async function runCapture(){
+async function runCapture(presetRemap){
   clearError();
   const remap = {};
   document.querySelectorAll(".remap-sel").forEach(sel=>{
     const v = sel.value.split(",").map(Number);
     remap[sel.dataset.sid] = v;
   });
+  if(presetRemap){ for(const k in presetRemap) remap[k] = presetRemap[k]; }
   const params = new URLSearchParams({
     action: $("action").value,
     duration: $("duration").value,
@@ -436,13 +456,14 @@ async function runCapture(){
     DATA = payload; frame = 0;
     $("scrub").max = DATA.meta.num_frames - 1;
     $("scrub").value = 0;
-    buildRemapSelectors(payload);
+    buildRemapSelectors(payload, presetRemap || {});
     renderSummary(payload); renderResidual(payload);
     renderAnchors(payload); renderCalib(payload);
+    renderAnomalies(payload);
   }catch(e){ showError(String(e)); }
 }
 
-function buildRemapSelectors(data){
+function buildRemapSelectors(data, preset){
   const box = $("remaps"); box.innerHTML = "";
   const LEGAL = [[0,1,2],[1,2,0],[2,0,1]];
   for(const [seg, sid] of Object.entries(data.placement)){
@@ -450,9 +471,11 @@ function buildRemapSelectors(data){
     const lab = document.createElement("span"); lab.textContent = seg;
     const sel = document.createElement("select");
     sel.className="remap-sel"; sel.dataset.sid = sid;
+    const chosen = preset[sid] ? preset[sid].join(",") : "0,1,2";
     LEGAL.forEach(p=>{
       const o=document.createElement("option");
       o.value=p.join(","); o.textContent="("+p.join(",")+")";
+      if(p.join(",")===chosen) o.selected = true;
       sel.appendChild(o);
     });
     row.append(lab, sel); box.appendChild(row);
@@ -474,6 +497,12 @@ function renderSummary(d){
   const je = d.joint_error_deg;
   const means = Object.values(je).map(x=>x.mean), p95s = Object.values(je).map(x=>x.p95);
   const slide = Object.values(d.foot_slide_total_m).reduce((a,b)=>a+b,0);
+  const gate = d.calibration_gate;
+  const gateTxt = gate
+    ? (gate.signed
+        ? '<span class="tag ok">已签核</span> '+gate.trigger
+        : '<span class="tag err">拒绝签核</span> 观测不足以区分装反轴与静偏')
+    : "—";
   $("summary").innerHTML =
     metric("动作", d.meta.action) +
     metric("帧数 / 时长", d.meta.num_frames + " / " + fmt(d.meta.duration_s,2)+"s") +
@@ -482,6 +511,7 @@ function renderSummary(d){
     metric("根位置 RMSE", fmt(d.root_pos_rmse_m,4)+" m") +
     metric("累计足滑（双脚）", fmt(slide,5)+" m") +
     metric("航向冲突事件", d.conflicts.length + " 次") +
+    metric("标定签核门", gateTxt) +
     (d.warnings.length ? metric("先验告警", d.warnings.join("；")) : "");
 }
 function metric(k,v){ return '<div class="metric"><span class="muted">'+k+
@@ -496,6 +526,36 @@ function renderResidual(d){
     barFor(d.residual.mean_deg[i], maxV)+
     '<div class="muted" style="font-size:11px">最大 '+fmt(d.residual.max_deg[i],3)+'°</div></div>'
   ).join("");
+}
+
+// 服务端异常标注：角色姿态与惯性偏差相关异常须显式标出（不静默）
+function renderAnomalies(d){
+  const flags = (d && d.anomaly_flags) || [];
+  if(!d || !flags.length){ clearError(); return; }
+  showError("检测到异常：\\n• " + flags.join("\\n• "));
+}
+
+// 惯性姿态回归样例：可从视窗直接打开
+let SAMPLES = [];
+function renderSamples(list){
+  SAMPLES = list || [];
+  const box = $("samples"); box.innerHTML = "";
+  SAMPLES.forEach((s, i)=>{
+    const b = document.createElement("button");
+    b.type = "button"; b.style.marginTop = "4px";
+    b.textContent = "样例 " + (i+1) + " · " + s.action + " · seed " + s.seed;
+    b.title = s.note || "";
+    b.onclick = ()=> loadSample(s);
+    box.appendChild(b);
+  });
+}
+function loadSample(s){
+  $("action").value = s.action;
+  $("duration").value = s.duration;
+  $("seed").value = s.seed;
+  $("noise").value = s.noise_deg;
+  $("drift").value = s.drift_rate;
+  runCapture(s.axis_remap || null);
 }
 
 function renderAnchors(d){
@@ -636,7 +696,10 @@ setInterval(()=>{
 }, 33);
 
 buildParentMap(); resize(); draw(); requestAnimationFrame(loop);
-runCapture();
+// 先取回归样例，再跑一次默认求解
+fetch("/api/options").then(r=>r.json()).then(o=>{
+  if(o && o.ok && o.regression_samples) renderSamples(o.regression_samples);
+}).catch(()=>{}).finally(()=>runCapture());
 </script>
 </body>
 </html>"""
@@ -663,11 +726,13 @@ class _CaptureHandler(BaseHTTPRequestHandler):
             self._send(200, _PAGE.encode("utf-8"), "text/html; charset=utf-8")
             return
         if parsed.path == "/api/options":
+            from .calibration_acceptance import regression_samples
             self._send_json({
                 "ok": True,
                 "actions": list(ACTIONS),
                 "legal_remaps": [list(p) for p in LEGAL_REMAPS],
                 "placement": {seg: sid for seg, sid in DEFAULT_SENSOR_PLACEMENT.items()},
+                "regression_samples": list(regression_samples()),
             })
             return
         if parsed.path == "/api/solve":

@@ -146,6 +146,27 @@ def cmd_bias(args) -> dict:
     return {"action": args.action, "rows": rows}
 
 
+def cmd_accept(args) -> dict:
+    """标定链验收（终端**仅辅助**；交互请用捕捉视窗）。
+
+    运行验收子项与旧样例回归，输出可审计报告。``--require-pass`` 时若有子项
+    未通过则以非零码退出，便于 CI 使用。
+    """
+    from .calibration_acceptance import run_acceptance, run_legacy_inertial_examples
+
+    report = run_acceptance()
+    legacy = run_legacy_inertial_examples()
+    payload = {
+        "acceptance": report.to_dict(),
+        "legacy_examples": legacy,
+        "passed": report.passed and all(
+            v.get("ran") for v in legacy.values()),
+    }
+    if args.require_pass and not payload["passed"]:
+        raise SystemExit(1)
+    return payload
+
+
 def _count_choices(conflicts: list[dict | None]) -> dict[str, int]:
     counts = {"correct_heading": 0, "release_anchor": 0}
     for c in conflicts:
@@ -222,6 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bias = sub.add_parser("bias", help="观测噪声偏置扫描")
     _add_common(p_bias)
     p_bias.set_defaults(func=cmd_bias)
+
+    p_accept = sub.add_parser(
+        "accept", help="标定链验收 + 旧样例回归（终端仅辅助）")
+    p_accept.add_argument("--require-pass", action="store_true",
+                          help="任一子项未通过则以非零码退出")
+    p_accept.set_defaults(func=cmd_accept)
     return parser
 
 
